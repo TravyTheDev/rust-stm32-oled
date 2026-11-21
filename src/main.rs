@@ -10,53 +10,62 @@ use embedded_graphics::{
     prelude::*,
     text::{Baseline, Text},
 };
-use heapless::String;
+use heapless::{String, Vec};
 use panic_halt as _;
 use ssd1306::{I2CDisplayInterface, Ssd1306, prelude::*};
 use stm32f4xx_hal::{
-    self as hal, block,
-    i2c::I2c,
-    rcc::Config,
-    serial::{Config as SerialConfig, Serial},
+    self as hal, i2c::I2c, nb, rcc::Config, serial::{Config as SerialConfig, Serial},
 };
-// use core::fmt::Write;
 
-const FONT_HEIGHT: i32 = 20;
-const LINE_SPACING: i32 = 2;
-const ROW_STEP: i32 = FONT_HEIGHT + LINE_SPACING;
-const MAX_Y: i32 = 64 - FONT_HEIGHT;
+const MAX_COLS: usize = 12;
+const MAX_ROWS: usize = 3;
+const CHAR_HEIGHT_PX: i32 = 20;
 
 struct ScreenText {
-    buf: String<128>,
-    row_y: i32,
-    col_x: i32,
+    lines: Vec<String<16>, MAX_ROWS>,
 }
 
 impl ScreenText {
     fn new() -> Self {
-        Self {
-            buf: String::new(),
-            row_y: 0,
-            col_x: 0,
-        }
+        let mut lines = Vec::new();
+        let _ = lines.push(String::new()); // Start with one empty active line
+        Self { lines }
     }
-    fn next_line(&mut self) {
-        self.col_x = 0;
-        if self.row_y < MAX_Y {
-            self.row_y += ROW_STEP;
+    fn start_new_line(&mut self) {
+        if self.lines.len() >= MAX_ROWS {
+            self.lines.remove(0);
         };
+        let _ = self.lines.push(String::new());
     }
     fn push_char(&mut self, ch: char) {
         match ch {
             '\r' | '\n' => {
-                self.next_line();
+                self.start_new_line();
             }
             '\x08' | '\x7f' => {
-                self.buf.pop();
+                let popped_from_current =
+                    self.lines.last_mut().
+                    and_then(|line| line.pop())
+                    .is_some();
+
+                if !popped_from_current && self.lines.len() > 1 {
+                    let _ = self.lines.pop();
+                }
             }
             _ => {
                 if ch.is_ascii_graphic() || ch == ' ' {
-                    let _ = self.buf.push(ch);
+                    let needs_wrap = self
+                        .lines
+                        .last()
+                        .map(|line| line.chars().count() > MAX_COLS)
+                        .unwrap_or(true);
+                    if needs_wrap {
+                        self.start_new_line();
+                    }
+
+                    if let Some(last_line) = self.lines.last_mut() {
+                        let _ = last_line.push(ch);
+                    }
                 }
             }
         }
@@ -86,7 +95,7 @@ fn main() -> ! {
     let scl = gpiob.pb6.internal_pull_up(true);
     let sda = gpiob.pb7.internal_pull_up(true);
 
-    let i2c = I2c::new(p.I2C1, (scl, sda), 100.kHz(), &mut rcc);
+    let i2c = I2c::new(p.I2C1, (scl, sda), 400.kHz(), &mut rcc);
 
     let interface = I2CDisplayInterface::new(i2c);
     let mut display = Ssd1306::new(interface, DisplaySize128x64, DisplayRotation::Rotate0)
@@ -100,20 +109,35 @@ fn main() -> ! {
 
     let mut screen_text = ScreenText::new();
     display.flush().unwrap();
-    loop {
-        let byte = block!(rx.read()).unwrap();
-        block!(tx.write(byte)).unwrap();
-        screen_text.push_char(byte as char);
-        let _ = display.clear(BinaryColor::Off);
 
-        Text::with_baseline(
-            &screen_text.buf,
-            Point::new(screen_text.col_x, screen_text.row_y),
-            text_style,
-            Baseline::Top,
-        )
-        .draw(&mut display)
-        .unwrap();
-        display.flush().unwrap();
+    loop {
+        let mut received_data = false;
+        
+        loop {
+            match rx.read() {
+                Ok(byte) => {
+                    let _ = tx.write(byte);
+                    screen_text.push_char(byte as char);
+                    received_data = true;
+                }
+                Err(nb::Error::WouldBlock) => {
+                    break;
+                }
+                Err(nb::Error::Other(_)) => {
+                    break;
+                }
+            }
+        }
+        
+        if received_data {
+            let _ = display.clear(BinaryColor::Off);
+            for (row_index, line) in screen_text.lines.iter().enumerate() {
+                let y = (row_index as i32) * CHAR_HEIGHT_PX;
+                Text::with_baseline(line, Point::new(0, y), text_style, Baseline::Top)
+                    .draw(&mut display)
+                    .unwrap();
+            }
+            let _ = display.flush();
+        }
     }
 }
