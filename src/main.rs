@@ -5,11 +5,12 @@
 use crate::hal::{pac, prelude::*};
 use cortex_m_rt as rt;
 use embedded_graphics::{
-    mono_font::{MonoTextStyleBuilder, ascii::FONT_6X10},
+    mono_font::{MonoTextStyleBuilder, ascii::FONT_10X20},
     pixelcolor::BinaryColor,
     prelude::*,
     text::{Baseline, Text},
 };
+use heapless::String;
 use panic_halt as _;
 use ssd1306::{I2CDisplayInterface, Ssd1306, prelude::*};
 use stm32f4xx_hal::{
@@ -18,19 +19,55 @@ use stm32f4xx_hal::{
     rcc::Config,
     serial::{Config as SerialConfig, Serial},
 };
-use heapless::String;
-use core::fmt::Write;
+// use core::fmt::Write;
+
+const FONT_HEIGHT: i32 = 20;
+const LINE_SPACING: i32 = 2;
+const ROW_STEP: i32 = FONT_HEIGHT + LINE_SPACING;
+const MAX_Y: i32 = 64 - FONT_HEIGHT;
+
+struct ScreenText {
+    buf: String<128>,
+    row_y: i32,
+    col_x: i32,
+}
+
+impl ScreenText {
+    fn new() -> Self {
+        Self {
+            buf: String::new(),
+            row_y: 0,
+            col_x: 0,
+        }
+    }
+    fn next_line(&mut self) {
+        self.col_x = 0;
+        if self.row_y < MAX_Y {
+            self.row_y += ROW_STEP;
+        };
+    }
+    fn push_char(&mut self, ch: char) {
+        match ch {
+            '\r' | '\n' => {
+                self.next_line();
+            }
+            '\x08' | '\x7f' => {
+                self.buf.pop();
+            }
+            _ => {
+                if ch.is_ascii_graphic() || ch == ' ' {
+                    let _ = self.buf.push(ch);
+                }
+            }
+        }
+    }
+}
 
 #[rt::entry]
 fn main() -> ! {
     let p = pac::Peripherals::take().unwrap();
     let mut rcc = p.RCC.freeze(Config::hse(8.MHz()));
     let gpioa = p.GPIOA.split(&mut rcc);
-    let (_, (ch1, ..)) = p.TIM2.pwm_hz(1.kHz(), &mut rcc);
-    let mut pwm = ch1.with(gpioa.pa5);
-    let max_duty = pwm.get_max_duty();
-    pwm.set_duty(0);
-    pwm.enable();
 
     let tx_pin = gpioa.pa2.into_alternate();
     let rx_pin = gpioa.pa3.into_alternate();
@@ -57,51 +94,26 @@ fn main() -> ! {
     display.init().unwrap();
 
     let text_style = MonoTextStyleBuilder::new()
-        .font(&FONT_6X10)
+        .font(&FONT_10X20)
         .text_color(BinaryColor::On)
         .build();
 
-    let mut buf: String<32> = String::new();
-    let _ = write!(&mut buf, "Brightness is 0");
-
-    Text::with_baseline(&buf, Point::zero(), text_style, Baseline::Top)
-        .draw(&mut display)
-        .unwrap();
-
+    let mut screen_text = ScreenText::new();
     display.flush().unwrap();
-
     loop {
         let byte = block!(rx.read()).unwrap();
         block!(tx.write(byte)).unwrap();
+        screen_text.push_char(byte as char);
+        let _ = display.clear(BinaryColor::Off);
 
-        let brightness: u32;
-
-        match byte {
-            b'1' => {
-                brightness = 25;
-            }
-            b'2' => {
-                brightness = 50;
-            }
-            b'3' => {
-                brightness = 75;
-            }
-            b'4' => {
-                brightness = 100;
-            }
-            _ => {
-                brightness = 0;
-            }
-        }
-        let duty = (max_duty as u32 * brightness) / 100;
-        pwm.set_duty(duty as u16);
-        display.clear(BinaryColor::Off);
-        buf.clear();
-        let _ = write!(&mut buf, "Brightness is {}", brightness);
-
-        Text::with_baseline(&buf, Point::zero(), text_style, Baseline::Top)
-            .draw(&mut display)
-            .unwrap();
+        Text::with_baseline(
+            &screen_text.buf,
+            Point::new(screen_text.col_x, screen_text.row_y),
+            text_style,
+            Baseline::Top,
+        )
+        .draw(&mut display)
+        .unwrap();
         display.flush().unwrap();
     }
 }
