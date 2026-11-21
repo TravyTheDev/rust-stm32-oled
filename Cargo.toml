@@ -1,0 +1,19 @@
+[package]
+name = "stm32-rust"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+cortex-m = "0.7.10"
+cortex-m-rt = "0.7.7"
+embedded-graphics = "0.8.2"
+heapless = "0.9.4"
+panic-halt = "1.0.0"
+ssd1306 = "0.10.0"
+stm32f4xx-hal = { version = "0.23.0", features = ["stm32f446"] }
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
