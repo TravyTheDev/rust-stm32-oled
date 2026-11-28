@@ -88,8 +88,19 @@ fn main() -> ! {
         &mut rcc,
     )
     .unwrap();
-
     let (mut tx, mut rx) = serial.split();
+
+    let bluetooth_tx = gpioa.pa9.into_alternate();
+    let bluetooth_rx = gpioa.pa10.into_alternate();
+
+    let bluetooth_serial: Serial<_, u8> = Serial::new(
+        p.USART1, 
+        (bluetooth_tx, bluetooth_rx),
+        SerialConfig::default().baudrate(9600.bps()),
+        &mut rcc,
+    ).unwrap();
+
+    let (mut bt_tx, mut bt_rx) = bluetooth_serial.split();
 
     let gpiob = p.GPIOB.split(&mut rcc);
     let scl = gpiob.pb6.internal_pull_up(true);
@@ -117,15 +128,24 @@ fn main() -> ! {
             match rx.read() {
                 Ok(byte) => {
                     let _ = tx.write(byte);
+                    let _ = bt_tx.write(byte);
                     screen_text.push_char(byte as char);
                     received_data = true;
                 }
-                Err(nb::Error::WouldBlock) => {
-                    break;
+                Err(nb::Error::WouldBlock) => break,
+                Err(nb::Error::Other(_)) => break,
+            }
+        }
+
+        loop {
+            match bt_rx.read() {
+                Ok(byte) => {
+                    let _ = tx.write(byte);
+                    screen_text.push_char(byte as char);
+                    received_data = true;
                 }
-                Err(nb::Error::Other(_)) => {
-                    break;
-                }
+                Err(nb::Error::WouldBlock) => break,
+                Err(nb::Error::Other(_)) => break,
             }
         }
         
